@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GLB Engine</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; }
+    #canvas { display: block; width: 100vw; height: 100vh; }
+    #ui {
+      position: fixed; top: 16px; right: 16px;
+      background: rgba(0,0,0,0.6); color: #fff;
+      font: 13px/1.6 monospace; padding: 12px 16px;
+      border-radius: 8px; min-width: 220px;
+      backdrop-filter: blur(8px);
+    }
+    #ui label { display: flex; justify-content: space-between; gap: 12px; margin: 4px 0; }
+    #ui input[type=range] { width: 100px; }
+    #fps { position: fixed; top: 16px; left: 16px; color: #0f0; font: 12px monospace; }
+    <!-- Ad slot (replace with your Google AdSense tag) -->
+    #ad-banner {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      height: 90px; background: rgba(0,0,0,0.4);
+      display: flex; align-items: center; justify-content: center;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="fps">FPS: --</div>
+
+  <div id="ui">
+    <b>Controls</b>
+    <label>Smear blur <input type="range" id="smear" min="0" max="100" value="0"></label>
+    <label>Focus dist <input type="range" id="focus" min="1" max="100" value="20"></label>
+    <label>Blur radius <input type="range" id="blur-r" min="0" max="20" value="6"></label>
+    <label>Bloom <input type="range" id="bloom" min="0" max="100" value="0"></label>
+    <label>Brightness <input type="range" id="brightness" min="50" max="150" value="100"></label>
+    <label>Contrast <input type="range" id="contrast" min="50" max="200" value="100"></label>
+    <label>Saturation <input type="range" id="saturation" min="0" max="200" value="100"></label>
+    <label>Sun X <input type="range" id="sun-x" min="-100" max="100" value="50"></label>
+    <label>Sun Y <input type="range" id="sun-y" min="0" max="100" value="80"></label>
+    <label>Ambient <input type="range" id="ambient" min="0" max="100" value="30"></label>
+    <label>Sky rot <input type="range" id="sky-rot" min="0" max="360" value="0"></label>
+    <label>Shadow res
+      <select id="shadow-res">
+        <option value="256">256</option>
+        <option value="512" selected>512</option>
+        <option value="1024">1024</option>
+      </select>
+    </label>
+  </div>
+
+  <div id="ad-banner">
+    <!-- PASTE YOUR GOOGLE ADSENSE BANNER CODE HERE -->
+    <span style="color:#555;font:12px sans-serif">Ad space — replace with AdSense tag</span>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
