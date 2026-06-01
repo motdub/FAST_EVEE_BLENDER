@@ -250,12 +250,6 @@ document.addEventListener('DOMContentLoaded', () => {
         e.target.classList.toggle('toggle-inactive', !active);
     });
 
-    document.getElementById('slider-sky-sun-orbit')?.addEventListener('input', (e) => {
-        viewer.setSkySunOrbit(parseFloat(e.target.value));
-    });
-    document.getElementById('slider-sky-sun-altitude')?.addEventListener('input', (e) => {
-        viewer.setSkySunAltitude(parseFloat(e.target.value));
-    });
     document.getElementById('select-sky-moon-phase')?.addEventListener('change', (e) => {
         viewer.setSkyMoonPhase(e.target.value);
     });

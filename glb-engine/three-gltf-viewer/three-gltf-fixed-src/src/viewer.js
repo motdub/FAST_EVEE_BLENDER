@@ -380,11 +380,14 @@ export class AnimeViewer {
             // Must null scene.background so the dome geometry shows
             this.scene.background = null;
         } else {
-            // Sky dome OFF → restore scene.background to loaded skybox or solid color
+            // Sky dome OFF → restore scene.background to loaded skybox or solid
             this.skySystem.toggle(false);
             if (this.loadedSkyboxBackground) {
-                // Raw equirect texture with EquirectangularReflectionMapping displays correctly
+                // Use the PMREM-processed version for correct tone mapping
                 this.scene.background = this.loadedSkyboxBackground;
+            } else if (this.loadedSkyboxTexture) {
+                // Fallback: use raw texture
+                this.scene.background = this.loadedSkyboxTexture;
             } else {
                 this.scene.background = new THREE.Color(0x111215);
             }
@@ -402,21 +405,10 @@ export class AnimeViewer {
     setSkyExposure(val)    { this.skySystem.setExposure(val); }
     setSkyCloudAmount(val) { this.skySystem.setCloudAmount(val); }
     setSkyCloudColor(hex)  { this.skySystem.setCloudColor(hex); }
+
     setSkyMoonPhase(phase) {
         const map = { crescent: 0.15, half: 0.5, full: 1.0 };
         this.skySystem.setMoonPhase(map[phase] ?? 1.0);
-    }
-
-    // Sky-only sun controls — move the sun in the sky dome independently
-    // These do NOT require Specular Overlay to be active
-    setSkySunOrbit(val) {
-        this._skySunOrbit = val;
-        this.skySystem.setSunDirection(val, this._skySunAltitude ?? 60);
-    }
-
-    setSkySunAltitude(val) {
-        this._skySunAltitude = val;
-        this.skySystem.setSunDirection(this._skySunOrbit ?? 45, val);
     }
 
     // =========================================================================
@@ -554,26 +546,21 @@ export class AnimeViewer {
         // Store raw texture (used by sky dome shader)
         this.loadedSkyboxTexture = texture;
 
-        // Process through PMREMGenerator for PBR reflections
+        // Process through PMREMGenerator for correct scene.background display
         const pmrem = new THREE.PMREMGenerator(this.renderer);
         pmrem.compileEquirectangularShader();
-        const envRenderTarget = pmrem.fromEquirectangular(texture);
+        const envMap = pmrem.fromEquirectangular(texture).texture;
         pmrem.dispose();
 
-        // For scene.environment (reflections): use the render target texture
-        this.scene.environment = envRenderTarget.texture;
-
-        // For scene.background: use the raw equirect texture directly —
-        // PMREM render target textures require special handling as backgrounds
-        // and the raw equirect with EquirectangularReflectionMapping displays correctly.
-        this.loadedSkyboxBackground = texture;
+        this.loadedSkyboxBackground = envMap;
+        this.scene.environment      = envMap; // PBR reflections
 
         if (this.features.skyOverride) {
-            // Sky dome active: feed raw equirect into dome shader
+            // Sky dome active: feed raw equirect into dome
             this.skySystem.setBackgroundTexture(texture);
         } else {
-            // Normal: display the equirect as the scene background
-            this.scene.background = texture;
+            // Normal: display processed version as background
+            this.scene.background = envMap;
         }
     }
 
@@ -600,69 +587,7 @@ export class AnimeViewer {
     }
 
     loadZipCubemap(arrayBuffer) {
-        // Dynamically load JSZip if not already present, then extract cube face images
-        const loadJSZip = () => {
-            if (window.JSZip) return Promise.resolve(window.JSZip);
-            return new Promise((resolve, reject) => {
-                const s = document.createElement('script');
-                s.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
-                s.onload = () => resolve(window.JSZip);
-                s.onerror = () => reject(new Error('Failed to load JSZip'));
-                document.head.appendChild(s);
-            });
-        };
-
-        loadJSZip().then(JSZip => JSZip.loadAsync(arrayBuffer)).then(zip => {
-            // Accepted face name patterns (px, nx, py, ny, pz, nz) or (right, left, top, bottom, front, back)
-            const faceMap = {
-                px: null, nx: null, py: null, ny: null, pz: null, nz: null
-            };
-            const altNames = {
-                right: 'px', left: 'nx', top: 'py', up: 'py',
-                bottom: 'ny', down: 'ny', front: 'pz', back: 'nz',
-                posx: 'px', negx: 'nx', posy: 'py', negy: 'ny', posz: 'pz', negz: 'nz'
-            };
-
-            const imagePromises = [];
-            zip.forEach((relativePath, zipEntry) => {
-                if (zipEntry.dir) return;
-                const base = relativePath.split('/').pop().toLowerCase().replace(/\.(jpg|jpeg|png|webp)$/, '');
-                const faceKey = faceMap.hasOwnProperty(base) ? base : altNames[base];
-                if (!faceKey) return;
-
-                const p = zipEntry.async('blob').then(blob => {
-                    return new Promise((res, rej) => {
-                        const img = new Image();
-                        const url = URL.createObjectURL(blob);
-                        img.onload = () => { URL.revokeObjectURL(url); res({ key: faceKey, img }); };
-                        img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('Image load failed: ' + relativePath)); };
-                        img.src = url;
-                    });
-                });
-                imagePromises.push(p);
-            });
-
-            return Promise.all(imagePromises).then(results => {
-                results.forEach(({ key, img }) => { faceMap[key] = img; });
-                const order = ['px', 'nx', 'py', 'ny', 'pz', 'nz'];
-                if (order.some(k => !faceMap[k])) {
-                    console.error('ZIP cubemap: missing faces. Found:', results.map(r => r.key));
-                    return;
-                }
-                const cubeTexture = new THREE.CubeTextureLoader().load(
-                    order.map(k => faceMap[k].src) // won't work with blobs
-                );
-                // Build CubeTexture manually from images
-                const cube = new THREE.CubeTexture(order.map(k => faceMap[k]));
-                cube.needsUpdate = true;
-                this.loadedSkyboxTexture    = cube;
-                this.loadedSkyboxBackground = cube;
-                this.scene.environment      = cube;
-                if (!this.features.skyOverride) {
-                    this.scene.background = cube;
-                }
-            });
-        }).catch(err => console.error('ZIP cubemap load error:', err));
+        console.warn('ZIP cubemap loading not implemented.');
     }
 
     // =========================================================================
