@@ -1,19 +1,19 @@
 import * as THREE from 'three';
 
 /**
- * SkyColorSystem
- * Procedural sky dome — day/night, animated FBM clouds, moon phases.
+ * SkyColorSystem — Procedural sky dome with sun, clouds, night mode
  *
- * Fixes vs previous version:
- * - Added procedural sun disc to daytime sky
- * - Sun position is driven by uniforms so it can be linked to specular orbit
+ * The sky dome is a SphereGeometry(450) with BackSide ShaderMaterial.
+ * When active, scene.background must be null (dome renders as geometry).
+ * When inactive, caller restores scene.background to the loaded skybox.
+ *
+ * The background texture (HDR/EXR) is passed in and composited BEHIND
+ * the procedural clouds when sky override is active.
  */
 export class SkyColorSystem {
     constructor(scene) {
-        this.scene = scene;
+        this.scene   = scene;
         this.visible = false;
-        this.skyDomeMesh = null;
-        this.skyShaderMaterial = null;
 
         this.params = {
             exposure:    1.0,
@@ -21,17 +21,17 @@ export class SkyColorSystem {
             cloudColor:  new THREE.Color('#ffffff'),
             nightMode:   0.0,
             moonPhase:   1.0,
-            sunOrbit:    45,    // degrees, synced with specular
-            sunAltitude: 60
+            sunOrbit:    45,
+            sunAltitude: 60,
         };
 
-        this.init();
+        this._init();
     }
 
-    init() {
-        const skyGeo = new THREE.SphereGeometry(450, 32, 15);
+    _init() {
+        const geo = new THREE.SphereGeometry(450, 32, 15);
 
-        this.skyShaderMaterial = new THREE.ShaderMaterial({
+        this.mat = new THREE.ShaderMaterial({
             side: THREE.BackSide,
             depthWrite: false,
             uniforms: {
@@ -39,28 +39,24 @@ export class SkyColorSystem {
                 u_useBackgroundTexture: { value: 0.0 },
                 u_skyColor:             { value: new THREE.Color('#0c4a6e') },
                 u_horizonColor:         { value: new THREE.Color('#7dd3fc') },
-                u_cloudColor:           { value: this.params.cloudColor },
+                u_cloudColor:           { value: this.params.cloudColor.clone() },
                 u_cloudAmount:          { value: this.params.cloudAmount },
                 u_exposure:             { value: this.params.exposure },
                 u_nightMode:            { value: 0.0 },
                 u_moonPhase:            { value: 1.0 },
                 u_sunDir:               { value: new THREE.Vector3(0.6, 0.7, 0.4).normalize() },
-                u_time:                 { value: 0.0 }
+                u_time:                 { value: 0.0 },
             },
             vertexShader: `
-                varying vec3 vWorldPosition;
-                varying vec2 vUv;
+                varying vec3 vWorldPos;
                 void main() {
-                    vUv = uv;
-                    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-                    vWorldPosition = worldPosition.xyz;
-                    gl_Position = projectionMatrix * viewMatrix * worldPosition;
+                    vec4 wp = modelMatrix * vec4(position, 1.0);
+                    vWorldPos = wp.xyz;
+                    gl_Position = projectionMatrix * viewMatrix * wp;
                 }
             `,
             fragmentShader: `
-                varying vec3 vWorldPosition;
-                varying vec2 vUv;
-
+                varying vec3 vWorldPos;
                 uniform sampler2D u_backgroundTexture;
                 uniform float     u_useBackgroundTexture;
                 uniform vec3      u_skyColor;
@@ -74,159 +70,125 @@ export class SkyColorSystem {
                 uniform float     u_time;
 
                 float hash(vec2 p) {
-                    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+                    return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453);
                 }
-
                 float noise(vec2 p) {
-                    vec2 i = floor(p);
-                    vec2 f = fract(p);
-                    vec2 u = f * f * (3.0 - 2.0 * f);
-                    return mix(
-                        mix(hash(i + vec2(0,0)), hash(i + vec2(1,0)), u.x),
-                        mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), u.x),
-                        u.y
-                    );
+                    vec2 i = floor(p); vec2 f = fract(p);
+                    vec2 u = f*f*(3.0-2.0*f);
+                    return mix(mix(hash(i),hash(i+vec2(1,0)),u.x),
+                               mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),u.x),u.y);
                 }
-
                 float fbm(vec2 p) {
-                    float v = 0.0, a = 0.5;
-                    vec2 shift = vec2(100.0);
-                    for (int i = 0; i < 4; ++i) {
-                        v += a * noise(p);
-                        p  = p * 2.0 + shift;
-                        a *= 0.5;
-                    }
+                    float v=0.0,a=0.5;
+                    for(int i=0;i<5;i++){v+=a*noise(p);p=p*2.1+vec2(100);a*=0.5;}
                     return v;
                 }
-
-                vec2 dirToEquirect(vec3 dir) {
-                    float phi   = atan(dir.z, dir.x);
-                    float theta = asin(clamp(dir.y, -1.0, 1.0));
-                    float u = 1.0 - (phi + 3.14159265) / (2.0 * 3.14159265);
-                    float v = (theta + 1.57079632) / 3.14159265;
-                    return vec2(u, v);
+                vec2 dirToUV(vec3 d) {
+                    float phi=atan(d.z,d.x);
+                    float theta=asin(clamp(d.y,-1.0,1.0));
+                    return vec2(1.0-(phi+3.14159265)/(2.0*3.14159265),
+                                (theta+1.5707963)/3.14159265);
                 }
 
                 void main() {
-                    vec3 dir = normalize(vWorldPosition);
-                    float h  = max(dir.y, 0.0);
+                    vec3 dir = normalize(vWorldPos);
+                    float h   = max(dir.y, 0.0);
 
-                    // --- Day background ---
-                    vec3 dayBackground;
+                    // ---- Day sky ----
+                    vec3 dayBg;
                     if (u_useBackgroundTexture > 0.5) {
-                        vec2 uv = dirToEquirect(dir);
-                        dayBackground = texture2D(u_backgroundTexture, uv).rgb;
+                        dayBg = texture2D(u_backgroundTexture, dirToUV(dir)).rgb;
                     } else {
-                        dayBackground = mix(u_horizonColor, u_skyColor, smoothstep(0.0, 0.6, h));
+                        dayBg = mix(u_horizonColor, u_skyColor, smoothstep(0.0, 0.55, h));
                     }
 
-                    // Sun disc + halo
-                    float sunDot  = dot(dir, normalize(u_sunDir));
-                    float sunDisc = smoothstep(0.9994, 0.9998, sunDot);
-                    float sunHalo = pow(max(sunDot, 0.0), 64.0) * 0.35;
-                    vec3  sunColor = vec3(1.0, 0.95, 0.75);
-                    dayBackground = mix(dayBackground, sunColor, sunHalo);
-                    dayBackground = mix(dayBackground, vec3(1.0, 1.0, 0.9), sunDisc);
+                    // Sun disc + halo (always rendered in day mode)
+                    vec3 sunN    = normalize(u_sunDir);
+                    float sunDot = dot(dir, sunN);
+                    float disc   = smoothstep(0.9994, 0.9999, sunDot);
+                    float halo   = pow(max(sunDot, 0.0), 48.0) * 0.4;
+                    float glow   = pow(max(sunDot, 0.0), 8.0)  * 0.12;
+                    vec3  sunC   = vec3(1.0, 0.95, 0.7);
+                    dayBg = mix(dayBg, dayBg + sunC * glow,  1.0);
+                    dayBg = mix(dayBg, sunC,                  halo);
+                    dayBg = mix(dayBg, vec3(1.0, 1.0, 0.92), disc);
 
-                    // --- Night background ---
-                    vec3 nightBackground = mix(vec3(0.01, 0.01, 0.03), vec3(0.002, 0.002, 0.01), h);
-
+                    // ---- Night sky ----
+                    vec3 nightBg = mix(vec3(0.01, 0.01, 0.03), vec3(0.002, 0.002, 0.01), h);
                     // Stars
-                    float starI = smoothstep(0.985, 1.0, hash(dir.xy * 250.0 + 40.0));
-                    nightBackground += vec3(starI * (0.6 + 0.4 * sin(u_time * 2.0))) * smoothstep(0.1, 0.8, h);
-
+                    float star = smoothstep(0.987, 1.0, hash(dir.xy * 300.0 + 41.0));
+                    nightBg   += vec3(star * (0.7 + 0.3 * sin(u_time * 2.3))) * smoothstep(0.08, 0.7, h);
                     // Moon
                     vec3  moonDir  = normalize(vec3(-0.5, 0.4, -0.6));
-                    float moonSize = 0.993;
                     float dtm      = dot(dir, moonDir);
+                    float moonSize = 0.9935;
                     if (dtm > moonSize) {
-                        float moonGlow = smoothstep(moonSize, 1.0, dtm);
-                        vec3  moonLocalRight = normalize(cross(moonDir, vec3(0, 1, 0)));
-                        float phaseInvert    = dot(dir, moonLocalRight) * 120.0;
-                        float phaseCutoff    = (u_moonPhase - 0.5) * 2.0;
-                        if (phaseInvert < phaseCutoff || u_moonPhase > 0.95) {
-                            nightBackground = mix(nightBackground, vec3(0.95, 0.95, 0.85),
-                                                  smoothstep(0.997, 1.0, dtm));
+                        float mg = smoothstep(moonSize, 1.0, dtm);
+                        vec3  mlr = normalize(cross(moonDir, vec3(0,1,0)));
+                        float phase = dot(dir, mlr) * 120.0;
+                        float cut   = (u_moonPhase - 0.5) * 2.0;
+                        if (phase < cut || u_moonPhase > 0.95) {
+                            nightBg = mix(nightBg, vec3(0.95,0.95,0.85),
+                                          smoothstep(0.997, 1.0, dtm));
                         }
-                        nightBackground += vec3(0.2, 0.3, 0.4) * moonGlow * (u_moonPhase * 0.5 + 0.5);
+                        nightBg += vec3(0.2,0.3,0.4)*mg*(u_moonPhase*0.5+0.5);
                     }
 
-                    vec3 baseBackground = mix(dayBackground, nightBackground, u_nightMode);
+                    vec3 baseBg = mix(dayBg, nightBg, u_nightMode);
 
-                    // --- Clouds ---
-                    vec2  skyUV      = dir.xz / (dir.y + 0.001);
-                    vec2  wind       = vec2(u_time * 0.015, u_time * 0.008);
-                    float cloudDensity = fbm(skyUV * 0.3 + wind);
-                    float cloudMask  = smoothstep(1.0 - u_cloudAmount, 1.3 - u_cloudAmount, cloudDensity);
-                    cloudMask       *= smoothstep(0.0, 0.2, dir.y);
+                    // ---- Clouds ----
+                    vec2 skyUV = dir.xz / (dir.y + 0.001);
+                    vec2 wind  = vec2(u_time * 0.014, u_time * 0.007);
+                    float cd   = fbm(skyUV * 0.28 + wind);
+                    float cm   = smoothstep(1.0 - u_cloudAmount, 1.3 - u_cloudAmount, cd);
+                    cm        *= smoothstep(0.0, 0.18, dir.y);
+                    vec3 cloudC = mix(u_cloudColor, vec3(0.1,0.1,0.18), u_nightMode);
+                    vec3 color  = mix(baseBg, cloudC, cm);
 
-                    vec3 activeCloudColor = mix(u_cloudColor, vec3(0.1, 0.1, 0.18), u_nightMode);
-                    vec3 colorOutput      = mix(baseBackground, activeCloudColor, cloudMask);
-
-                    gl_FragColor = vec4(colorOutput * u_exposure, 1.0);
+                    gl_FragColor = vec4(color * u_exposure, 1.0);
                 }
             `
         });
 
-        this.skyDomeMesh = new THREE.Mesh(skyGeo, this.skyShaderMaterial);
-        this.skyDomeMesh.visible = false;
-        this.skyDomeMesh.renderOrder = -1;
-        this.scene.add(this.skyDomeMesh);
+        this.mesh = new THREE.Mesh(geo, this.mat);
+        this.mesh.visible     = false;
+        this.mesh.renderOrder = -1;
+        this.scene.add(this.mesh);
     }
 
-    /** Update the sun direction uniform to match specular light orbit */
     setSunDirection(orbitDeg, altitudeDeg) {
-        const orbitRad   = THREE.MathUtils.degToRad(orbitDeg);
-        const altitudeRad = THREE.MathUtils.degToRad(altitudeDeg);
-        const x = Math.cos(altitudeRad) * Math.cos(orbitRad);
-        const y = Math.sin(altitudeRad);
-        const z = Math.cos(altitudeRad) * Math.sin(orbitRad);
-        if (this.skyShaderMaterial) {
-            this.skyShaderMaterial.uniforms.u_sunDir.value.set(x, y, z).normalize();
-        }
+        const or = THREE.MathUtils.degToRad(orbitDeg);
+        const al = THREE.MathUtils.degToRad(altitudeDeg);
+        this.mat.uniforms.u_sunDir.value.set(
+            Math.cos(al) * Math.cos(or),
+            Math.sin(al),
+            Math.cos(al) * Math.sin(or)
+        ).normalize();
     }
 
     setBackgroundTexture(texture) {
-        if (!this.skyShaderMaterial) return;
         if (texture) {
-            this.skyShaderMaterial.uniforms.u_backgroundTexture.value = texture;
-            this.skyShaderMaterial.uniforms.u_useBackgroundTexture.value = 1.0;
+            this.mat.uniforms.u_backgroundTexture.value    = texture;
+            this.mat.uniforms.u_useBackgroundTexture.value = 1.0;
         } else {
-            this.skyShaderMaterial.uniforms.u_backgroundTexture.value = null;
-            this.skyShaderMaterial.uniforms.u_useBackgroundTexture.value = 0.0;
+            this.mat.uniforms.u_backgroundTexture.value    = null;
+            this.mat.uniforms.u_useBackgroundTexture.value = 0.0;
         }
     }
 
     toggle(forceState) {
-        this.visible = (forceState !== undefined) ? forceState : !this.visible;
-        this.skyDomeMesh.visible = this.visible;
+        this.visible      = (forceState !== undefined) ? forceState : !this.visible;
+        this.mesh.visible = this.visible;
         return this.visible;
     }
 
-    update(elapsedTime) {
-        if (this.skyShaderMaterial) {
-            this.skyShaderMaterial.uniforms.u_time.value = elapsedTime;
-        }
+    update(elapsed) {
+        this.mat.uniforms.u_time.value = elapsed;
     }
 
-    setNightMode(val) {
-        if (this.skyShaderMaterial) this.skyShaderMaterial.uniforms.u_nightMode.value = val ? 1.0 : 0.0;
-    }
-
-    setExposure(val) {
-        if (this.skyShaderMaterial) this.skyShaderMaterial.uniforms.u_exposure.value = val;
-    }
-
-    setCloudAmount(val) {
-        if (this.skyShaderMaterial) this.skyShaderMaterial.uniforms.u_cloudAmount.value = val;
-    }
-
-    setCloudColor(hex) {
-        if (this.skyShaderMaterial) this.skyShaderMaterial.uniforms.u_cloudColor.value.set(hex);
-    }
-
-    setMoonPhase(val) {
-        this.params.moonPhase = val;
-        if (this.skyShaderMaterial) this.skyShaderMaterial.uniforms.u_moonPhase.value = val;
-    }
+    setNightMode(on)     { this.mat.uniforms.u_nightMode.value   = on ? 1.0 : 0.0; }
+    setExposure(val)     { this.mat.uniforms.u_exposure.value    = val; }
+    setCloudAmount(val)  { this.mat.uniforms.u_cloudAmount.value = val; }
+    setCloudColor(hex)   { this.mat.uniforms.u_cloudColor.value.set(hex); }
+    setMoonPhase(val)    { this.mat.uniforms.u_moonPhase.value   = val; }
 }

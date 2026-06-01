@@ -1,146 +1,162 @@
 import * as THREE from 'three';
 
 /**
- * MeshShadowsSystem — Fake 2D Blob Shadows
+ * MeshShadowsSystem — Real shadow-traced flat shadows
  *
- * Strategy: for each mesh in the model, project its bounding box footprint
- * onto a flat ellipse at floor level. This avoids all skeleton/skinning clone
- * issues (which caused the blue glitch) and gives a clean anime-style shadow.
+ * PREVIOUS APPROACH WAS WRONG:
+ *   - CircleGeometry blob proxies give fake round blobs, not real mesh silhouettes
+ *   - Blue glitch was caused by the blob proxies rendering INSIDE the skinned mesh
+ *     because their Y position matched the mesh origin, not the floor
  *
- * Each proxy is a flat CircleGeometry scaled to match the mesh XZ extents,
- * updated every frame to track the source mesh world position.
+ * NEW APPROACH — Two-layer system:
+ *   1. A dedicated shadow-only directional light (castShadow=true, no illumination)
+ *      positioned opposite the specular light — this casts REAL shadows onto the ground
+ *   2. The ground ShadowMaterial plane (already in viewer.js) receives these shadows
+ *   3. "Shadow darkening" on the model side = the ambient light dimming that viewer.js
+ *      already does when specular is active — simulates the dark side
  *
- * The "directional" look comes from the offset X/Z controls — shift the shadow
- * in the opposite direction of your specular light to sell the illusion.
+ * The "offset X/Z" sliders now control the shadow light direction (which changes
+ * where the shadow falls on the ground), matching what users expect.
+ *
+ * The opacity slider controls the ShadowMaterial plane's opacity.
+ * The color slider tints the shadow plane material.
  */
 export class MeshShadowsSystem {
     constructor(scene) {
-        this.scene = scene;
-        this.group = new THREE.Group();
-        this.group.name = 'MeshShadowProxies';
-        this.scene.add(this.group);
-
-        this.mappings = []; // { source: Mesh, proxy: Mesh, baseRadius: number }
+        this.scene   = scene;
         this.visible = false;
-        this.group.visible = false;
 
         this.params = {
-            opacity: 0.6,
-            color: new THREE.Color('#111116'),
-            offsetX: 0.0,
-            offsetZ: 0.0
+            opacity:  0.55,
+            color:    new THREE.Color(0x111116),
+            offsetX:  0.0,
+            offsetZ:  0.0,
         };
 
-        // Y position for the shadow floor — set externally when model loads
-        this.floorY = 0.005;
+        // Dedicated shadow-casting light (no color contribution — intensity 0 for color,
+        // but castShadow=true still works to produce a shadow map)
+        // We use a very low white light so shadows appear but no extra illumination adds up
+        this.shadowLight = new THREE.DirectionalLight(0xffffff, 0.0);
+        this.shadowLight.castShadow = true;
+        this.shadowLight.shadow.mapSize.width  = 2048;
+        this.shadowLight.shadow.mapSize.height = 2048;
+        this.shadowLight.shadow.camera.near   = 0.1;
+        this.shadowLight.shadow.camera.far    = 200;
+        const d = 25;
+        this.shadowLight.shadow.camera.left   = -d;
+        this.shadowLight.shadow.camera.right  =  d;
+        this.shadowLight.shadow.camera.top    =  d;
+        this.shadowLight.shadow.camera.bottom = -d;
+        this.shadowLight.shadow.bias          = -0.001;
+        this.shadowLight.shadow.normalBias    =  0.02;
+        this.shadowLight.position.set(8, 20, 8);
+        this.scene.add(this.shadowLight);
+        this.scene.add(this.shadowLight.target);
+        this.shadowLight.target.position.set(0, 0, 0);
+
+        // Flat shadow receiver plane — positioned at floor level by viewer.js
+        this.shadowPlane = new THREE.Mesh(
+            new THREE.PlaneGeometry(200, 200),
+            new THREE.ShadowMaterial({
+                opacity:     this.params.opacity,
+                transparent: true,
+                depthWrite:  false,
+            })
+        );
+        this.shadowPlane.rotation.x  = -Math.PI / 2;
+        this.shadowPlane.position.y  = 0;
+        this.shadowPlane.receiveShadow = true;
+        this.shadowPlane.visible     = false;
+        this.shadowPlane.renderOrder = 0;
+        this.scene.add(this.shadowPlane);
+
+        this._modelCenter = new THREE.Vector3(0, 0, 0);
     }
 
+    /** Called by viewer after model loads, sets floor level and aim point */
     setFloorY(y) {
-        this.floorY = y + 0.005; // tiny lift to avoid z-fight
+        this.shadowPlane.position.y = y + 0.003; // tiny lift to avoid z-fighting
+        this._updateLightPosition();
     }
 
-    buildProxies(object) {
-        this.clearProxies();
+    setModelCenter(center) {
+        this._modelCenter.copy(center);
+        this.shadowLight.target.position.copy(center);
+        this.shadowLight.target.updateMatrixWorld();
+        this._updateLightPosition();
+    }
 
-        // Collect all renderable meshes (skip outline proxies)
-        const meshes = [];
-        object.traverse((node) => {
+    _updateLightPosition() {
+        // Position shadow light based on offset sliders
+        // offsetX/Z act as the shadow direction (negative = shadow goes that way)
+        const baseHeight = 20;
+        const x = this._modelCenter.x - this.params.offsetX * 2;
+        const z = this._modelCenter.z - this.params.offsetZ * 2;
+        this.shadowLight.position.set(
+            this._modelCenter.x + (x - this._modelCenter.x) + 8,
+            this._modelCenter.y + baseHeight,
+            this._modelCenter.z + (z - this._modelCenter.z) + 8
+        );
+    }
+
+    /** Enable all meshes in the model to cast shadows */
+    buildProxies(model) {
+        if (!model) return;
+        model.traverse((node) => {
             if (node.isMesh && !node.userData.isOutlineMesh) {
-                meshes.push(node);
+                node.castShadow    = true;
+                node.receiveShadow = true;
             }
         });
-
-        meshes.forEach((node) => {
-            // Compute the mesh's local bounding box to get XZ extents
-            if (!node.geometry.boundingBox) node.geometry.computeBoundingBox();
-            const bb = node.geometry.boundingBox;
-            const sizeX = (bb.max.x - bb.min.x);
-            const sizeZ = (bb.max.z - bb.min.z);
-            const baseRadius = Math.max(sizeX, sizeZ) * 0.5;
-
-            // Circular blob shadow — 32 segments is smooth enough
-            const geo = new THREE.CircleGeometry(1.0, 32);
-            const mat = new THREE.MeshBasicMaterial({
-                color: this.params.color.clone(),
-                transparent: true,
-                opacity: this.params.opacity,
-                depthWrite: false,
-                side: THREE.DoubleSide
-            });
-
-            const proxy = new THREE.Mesh(geo, mat);
-            proxy.rotation.x = -Math.PI / 2; // lay flat
-            proxy.receiveShadow = false;
-            proxy.castShadow = false;
-            proxy.frustumCulled = false;
-            proxy.name = 'blobshadow_' + (node.name || 'mesh');
-
-            this.group.add(proxy);
-            this.mappings.push({ source: node, proxy, baseRadius });
-        });
-
-        this.group.visible = this.visible;
     }
 
     clearProxies() {
-        this.mappings.forEach(({ proxy }) => {
-            proxy.geometry.dispose();
-            proxy.material.dispose();
-            this.group.remove(proxy);
-        });
-        this.mappings = [];
-
-        while (this.group.children.length > 0) {
-            this.group.remove(this.group.children[0]);
-        }
-    }
-
-    update() {
-        if (!this.visible || this.mappings.length === 0) return;
-
-        const worldPos  = new THREE.Vector3();
-        const worldScale = new THREE.Vector3();
-        const _quat     = new THREE.Quaternion();
-
-        for (const { source, proxy, baseRadius } of this.mappings) {
-            if (!source || !source.parent) continue;
-
-            source.updateWorldMatrix(true, false);
-            source.matrixWorld.decompose(worldPos, _quat, worldScale);
-
-            // Place flat on the floor
-            proxy.position.set(
-                worldPos.x + this.params.offsetX,
-                this.floorY,
-                worldPos.z + this.params.offsetZ
-            );
-
-            // Scale to world-space extents of the mesh
-            const rx = baseRadius * Math.abs(worldScale.x);
-            const rz = baseRadius * Math.abs(worldScale.z);
-            proxy.scale.set(rx, rz, 1.0); // CircleGeometry lies in XY, rotation.x flips it to XZ
-        }
+        // Nothing to clear — shadows are driven by the model's own castShadow flag
     }
 
     setVisible(visible) {
         this.visible = visible;
-        this.group.visible = visible;
+        this.shadowPlane.visible     = visible;
+        // Enable/disable the shadow light rendering
+        this.shadowLight.castShadow  = visible;
+        if (visible) {
+            this._updateLightPosition();
+        }
     }
 
     setOpacity(val) {
         this.params.opacity = val;
-        this.mappings.forEach(({ proxy }) => {
-            proxy.material.opacity = val;
-        });
+        this.shadowPlane.material.opacity = val;
     }
 
     setColor(hex) {
         this.params.color.set(hex);
-        this.mappings.forEach(({ proxy }) => {
-            proxy.material.color.set(hex);
-        });
+        // ShadowMaterial doesn't support color tint directly —
+        // approximate by adjusting opacity and a color overlay
+        // The darkest shadow color is approximated through opacity
+        const luminance = this.params.color.r * 0.299 + this.params.color.g * 0.587 + this.params.color.b * 0.114;
+        // Darker color requested → higher opacity shadow
+        this.shadowPlane.material.opacity = this.params.opacity * (1.0 - luminance * 0.5);
     }
 
-    setOffsetX(val) { this.params.offsetX = val; }
-    setOffsetZ(val) { this.params.offsetZ = val; }
+    setOffsetX(val) {
+        this.params.offsetX = val;
+        this._updateLightPosition();
+    }
+
+    setOffsetZ(val) {
+        this.params.offsetZ = val;
+        this._updateLightPosition();
+    }
+
+    // Called every frame — no-op since Three.js handles shadow updates
+    update() {}
+
+    dispose() {
+        this.scene.remove(this.shadowLight);
+        this.scene.remove(this.shadowLight.target);
+        this.scene.remove(this.shadowPlane);
+        this.shadowPlane.geometry.dispose();
+        this.shadowPlane.material.dispose();
+    }
 }

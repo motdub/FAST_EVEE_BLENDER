@@ -1,17 +1,24 @@
 import * as THREE from 'three';
 
 /**
- * CelShaderSystem
- * Injects toon/cel shading into MeshStandardMaterial / MeshPhysicalMaterial
- * using onBeforeCompile. Clones materials per mesh so originals are never
- * mutated — this means clearPatches() can safely restore them on model reload.
+ * CelShaderSystem — r160 compatible
+ *
+ * ROOT CAUSE OF PREVIOUS FAILURE:
+ *   - `#include <lights_fragment_end>` does NOT exist in r160 fragment shaders.
+ *   - The correct injection point is `#include <lights_fragment_maps>` which
+ *     appears AFTER all light accumulation in the standard shader.
+ *   - We also inject BEFORE `gl_FragColor` assignment using `outgoingLight` which
+ *     is the final accumulated light value.
+ *
+ * STRATEGY: quantize `outgoingLight` just before the final color assignment.
+ * This correctly bands the entire lit output (diffuse + specular + emissive halo)
+ * into N flat toon steps without touching reflections or environment maps.
  */
 export class CelShaderSystem {
     constructor() {
         this.isActive = false;
         this.steps = 4;
-        // Each entry: { node, originalMaterial, patchedMaterial, shader }
-        this._patches = [];
+        this._patches = []; // { node, originalMaterial, patchedMaterial, matIndex, shader }
     }
 
     toggle() {
@@ -45,7 +52,6 @@ export class CelShaderSystem {
                     return mat;
                 }
 
-                // Clone so we never touch the original
                 const cloned = mat.clone();
                 const entry = { node, originalMaterial: mat, patchedMaterial: cloned, shader: null, matIndex: idx };
                 this._patches.push(entry);
@@ -54,43 +60,34 @@ export class CelShaderSystem {
                     shader.uniforms.uCelActive = { value: this.isActive ? 1.0 : 0.0 };
                     shader.uniforms.uCelSteps  = { value: parseFloat(this.steps) };
 
-                    // Insert uniforms + helper before main()
+                    // Inject uniform declarations at top of fragment shader
+                    shader.fragmentShader = 'uniform float uCelActive;\nuniform float uCelSteps;\n' + shader.fragmentShader;
+
+                    // In r160, the final output is assembled as:
+                    //   vec3 outgoingLight = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse
+                    //                     + reflectedLight.directSpecular + reflectedLight.indirectSpecular
+                    //                     + totalEmissiveRadiance;
+                    // We replace that line to inject cel quantization before gl_FragColor is set.
                     shader.fragmentShader = shader.fragmentShader.replace(
-                        `void main() {`,
-                        `uniform float uCelActive;
-uniform float uCelSteps;
-
-float celQuantize(float val, float steps) {
-    return floor(val * steps) / steps;
-}
-
-void main() {`
-                    );
-
-                    // Quantize diffuse after lighting is resolved
-                    shader.fragmentShader = shader.fragmentShader.replace(
-                        `#include <lights_fragment_end>`,
-                        `#include <lights_fragment_end>
+                        `vec3 outgoingLight = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse + reflectedLight.directSpecular + reflectedLight.indirectSpecular + totalEmissiveRadiance;`,
+                        `vec3 outgoingLight = reflectedLight.directDiffuse + reflectedLight.indirectDiffuse + reflectedLight.directSpecular + reflectedLight.indirectSpecular + totalEmissiveRadiance;
 if (uCelActive > 0.5) {
-    float lum = dot(reflectedLight.directDiffuse, vec3(0.299, 0.587, 0.114));
-    float cel = celQuantize(max(lum, 0.0), uCelSteps);
-    float ratio = (lum > 0.001) ? (cel / lum) : 1.0;
-    reflectedLight.directDiffuse  *= ratio;
-    reflectedLight.directSpecular *= ratio;
+    float lum = dot(outgoingLight, vec3(0.299, 0.587, 0.114));
+    if (lum > 0.001) {
+        float cel = floor(lum * uCelSteps) / uCelSteps;
+        outgoingLight *= (cel / lum);
+    }
 }`
                     );
 
                     entry.shader = shader;
                 };
 
-                // customProgramCacheKey must differ from original so Three.js
-                // compiles a new program for this clone
-                cloned.customProgramCacheKey = () => `cel_${this.steps}`;
+                cloned.customProgramCacheKey = () => `cel_v2_${this.steps}`;
                 cloned.needsUpdate = true;
                 return cloned;
             });
 
-            // Apply patched materials to node
             if (Array.isArray(node.material)) {
                 node.material = patchedMats;
             } else {
@@ -100,7 +97,6 @@ if (uCelActive > 0.5) {
     }
 
     clearPatches() {
-        // Restore original materials on every node
         this._patches.forEach(({ node, originalMaterial, patchedMaterial, matIndex }) => {
             if (!node) return;
             if (Array.isArray(node.material)) {
@@ -108,7 +104,6 @@ if (uCelActive > 0.5) {
             } else {
                 node.material = originalMaterial;
             }
-            // Dispose the cloned material to free GPU memory
             if (patchedMaterial && patchedMaterial !== originalMaterial) {
                 patchedMaterial.dispose();
             }

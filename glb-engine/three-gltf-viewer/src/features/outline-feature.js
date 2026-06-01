@@ -1,33 +1,44 @@
 import * as THREE from 'three';
 
 /**
- * OutlineFeature
- * Renders ink outlines using back-face extrusion.
- * - Adds child outline mesh to each source mesh (follows transforms automatically)
- * - USE_SKINNING define is explicitly set so r160 compiles the skinning path
- * - renderOrder = 1 (render after model, not before) with BackSide + depthTest
+ * OutlineFeature — r160 compatible, back-face extrusion outlines
+ *
+ * ROOT CAUSE OF PREVIOUS FAILURE:
+ *   - The custom vertex shader tried to manually compose boneMatX/Y/Z/W which
+ *     do NOT exist as individual uniforms in Three.js r160. Skinning is done
+ *     via a bone texture (boneTexture/boneTextureSize uniforms).
+ *   - #include <skinning_pars_vertex> in a ShaderMaterial does NOT auto-inject
+ *     the bone texture uniforms — those are only injected by WebGLProgram when
+ *     it detects a SkinnedMesh with USE_SKINNING.
+ *   - FIX: For SkinnedMesh, we use a RawShaderMaterial approach that mirrors
+ *     exactly what Three.js does internally for skinned vertex displacement,
+ *     by pulling bone data from the boneTexture uniform directly.
+ *
+ * SIMPLER CORRECT APPROACH for r160:
+ *   Use onBeforeCompile on a MeshBasicMaterial (side=BackSide) to inject
+ *   the extrusion. Since MeshBasicMaterial goes through the standard program
+ *   compiler, Three.js injects all skinning code automatically when it detects
+ *   a SkinnedMesh. We just add the extrusion step AFTER skinning is applied.
  */
 export class OutlineFeature {
     constructor() {
-        this.isActive = false;
-        this.thickness = 0.02; // world-space units
+        this.isActive   = false;
+        this.thickness  = 0.015;
         this.outlineMeshes = [];
     }
 
     toggle() {
         this.isActive = !this.isActive;
-        this.outlineMeshes.forEach(mesh => {
-            mesh.visible = this.isActive;
-        });
+        this.outlineMeshes.forEach(m => { m.visible = this.isActive; });
         return this.isActive;
     }
 
     setThickness(val) {
-        // slider range 1–5 → world units 0.005–0.06
-        this.thickness = val * 0.012;
-        this.outlineMeshes.forEach(mesh => {
-            if (mesh.material && mesh.material.uniforms) {
-                mesh.material.uniforms.uOutlineThickness.value = this.thickness;
+        // slider 1–5 → world units 0.004–0.05
+        this.thickness = val * 0.01;
+        this.outlineMeshes.forEach(m => {
+            if (m.material?.uniforms?.uOutlineThick) {
+                m.material.uniforms.uOutlineThick.value = this.thickness;
             }
         });
     }
@@ -38,97 +49,72 @@ export class OutlineFeature {
         model.traverse((node) => {
             if (!node.isMesh || node.userData.isOutlineMesh) return;
 
-            const isSkinned = node.isSkinnedMesh;
-
-            const defines = {};
-            if (isSkinned) {
-                defines['USE_SKINNING'] = '';
-                // Also need morph support if present
-                if (node.morphTargetInfluences && node.morphTargetInfluences.length > 0) {
-                    defines['USE_MORPHTARGETS'] = '';
-                }
-            }
-
-            const outlineMaterial = new THREE.ShaderMaterial({
+            // Build outline material using onBeforeCompile so Three.js handles
+            // all the skinning/morph setup automatically
+            const outlineMat = new THREE.MeshBasicMaterial({
+                color: 0x000000,
                 side: THREE.BackSide,
-                depthWrite: true,
-                depthTest: true,
                 transparent: false,
-                defines,
-                uniforms: {
-                    uOutlineThickness: { value: this.thickness },
-                    uOutlineColor:     { value: new THREE.Color(0x000000) },
-                    // Required by skinning includes
-                    bindMatrix:        { value: isSkinned ? node.bindMatrix : new THREE.Matrix4() },
-                    bindMatrixInverse: { value: isSkinned ? node.bindMatrixInverse : new THREE.Matrix4() },
-                },
-                vertexShader: `
-                    uniform float uOutlineThickness;
-
-                    #include <common>
-                    #include <morphtarget_pars_vertex>
-                    #include <skinning_pars_vertex>
-
-                    void main() {
-                        #include <skinbase_vertex>
-                        #include <begin_vertex>
-                        #include <morphtarget_vertex>
-                        #include <skinning_vertex>
-
-                        // Compute normal in object space, then apply skinning if needed
-                        vec3 objNormal = normalize(objectNormal);
-
-                        #ifdef USE_SKINNING
-                            mat4 skinMatrix =
-                                skinWeight.x * boneMatX +
-                                skinWeight.y * boneMatY +
-                                skinWeight.z * boneMatZ +
-                                skinWeight.w * boneMatW;
-                            objNormal = normalize((skinMatrix * vec4(objNormal, 0.0)).xyz);
-                        #endif
-
-                        // Extrude in view space along view-space normal
-                        vec3 vNorm = normalize(normalMatrix * objNormal);
-                        vec4 mvPos = modelViewMatrix * vec4(transformed, 1.0);
-                        mvPos.xyz += vNorm * uOutlineThickness;
-                        gl_Position = projectionMatrix * mvPos;
-                    }
-                `,
-                fragmentShader: `
-                    uniform vec3 uOutlineColor;
-                    void main() {
-                        gl_FragColor = vec4(uOutlineColor, 1.0);
-                    }
-                `
+                depthWrite: true,
             });
 
+            // Store thickness so we can update it
+            outlineMat._outlineThick = this.thickness;
+
+            outlineMat.onBeforeCompile = (shader) => {
+                shader.uniforms.uOutlineThick = { value: outlineMat._outlineThick };
+
+                // After all standard transforms (including skinning), push
+                // the vertex outward along the view-space normal
+                shader.vertexShader = 'uniform float uOutlineThick;\n' + shader.vertexShader;
+
+                // Replace the final gl_Position assignment to add outline offset
+                // mvPosition is computed by Three.js standard chunks
+                shader.vertexShader = shader.vertexShader.replace(
+                    `#include <project_vertex>`,
+                    `#include <project_vertex>
+// Outline extrusion: push vertex along view-space normal
+vec3 vNormal_outline = normalize( normalMatrix * objectNormal );
+vec4 mvPos_outline = modelViewMatrix * vec4( transformed, 1.0 );
+mvPos_outline.xyz += vNormal_outline * uOutlineThick;
+gl_Position = projectionMatrix * mvPos_outline;`
+                );
+
+                // Expose uniforms for later updates
+                outlineMat.userData.shader = shader;
+                outlineMat.uniforms = shader.uniforms;
+            };
+
+            outlineMat.customProgramCacheKey = () => 'outline_v3';
+
             let outlineMesh;
-            if (isSkinned) {
-                outlineMesh = new THREE.SkinnedMesh(node.geometry, outlineMaterial);
+            if (node.isSkinnedMesh) {
+                outlineMesh = new THREE.SkinnedMesh(node.geometry, outlineMat);
                 outlineMesh.bind(node.skeleton, node.bindMatrix);
                 if (node.morphTargetInfluences) {
-                    outlineMesh.morphTargetInfluences = node.morphTargetInfluences;
-                    outlineMesh.morphTargetDictionary = node.morphTargetDictionary;
+                    outlineMesh.morphTargetInfluences  = node.morphTargetInfluences;
+                    outlineMesh.morphTargetDictionary  = node.morphTargetDictionary;
                 }
             } else {
-                outlineMesh = new THREE.Mesh(node.geometry, outlineMaterial);
+                outlineMesh = new THREE.Mesh(node.geometry, outlineMat);
             }
 
             outlineMesh.userData.isOutlineMesh = true;
-            outlineMesh.visible = this.isActive;
-            outlineMesh.frustumCulled = false;
-            outlineMesh.renderOrder = 1; // render after the model, not before
+            outlineMesh.visible        = this.isActive;
+            outlineMesh.frustumCulled  = false;
+            outlineMesh.castShadow     = false;
+            outlineMesh.receiveShadow  = false;
+            outlineMesh.renderOrder    = 0;
 
-            // Add as child so it inherits the parent's transforms automatically
             node.add(outlineMesh);
             this.outlineMeshes.push(outlineMesh);
         });
     }
 
     clearOutlines() {
-        this.outlineMeshes.forEach(mesh => {
-            if (mesh.parent) mesh.parent.remove(mesh);
-            if (mesh.material) mesh.material.dispose();
+        this.outlineMeshes.forEach(m => {
+            if (m.parent) m.parent.remove(m);
+            if (m.material) m.material.dispose();
         });
         this.outlineMeshes = [];
     }

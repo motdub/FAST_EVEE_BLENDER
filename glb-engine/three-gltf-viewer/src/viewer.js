@@ -1,21 +1,21 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
-import { EXRLoader } from 'three/examples/jsm/loaders/EXRLoader.js';
-import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
-import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { OrbitControls }   from 'three/examples/jsm/controls/OrbitControls.js';
+import { GLTFLoader }      from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { RGBELoader }      from 'three/examples/jsm/loaders/RGBELoader.js';
+import { EXRLoader }       from 'three/examples/jsm/loaders/EXRLoader.js';
+import { EffectComposer }  from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass }      from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { ShaderPass }      from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 
 import { SpecularHighlightSystem } from './features/specular-highlight.js';
-import { MeshShadowsSystem } from './features/mesh-shadows.js';
-import { HighlightBlurSystem } from './features/highlight-blur.js';
-import { SkyColorSystem } from './features/skycolor.js';
-import { OutlineFeature } from './features/outline-feature.js';
-import { CelShaderSystem } from './features/cel-shader.js';
-import { BloomFeature } from './features/bloom-feature.js';
-import { FrameRateReducer } from './features/framerate-reducer.js';
+import { MeshShadowsSystem }       from './features/mesh-shadows.js';
+import { HighlightBlurSystem }     from './features/highlight-blur.js';
+import { SkyColorSystem }          from './features/skycolor.js';
+import { OutlineFeature }          from './features/outline-feature.js';
+import { CelShaderSystem }         from './features/cel-shader.js';
+import { BloomFeature }            from './features/bloom-feature.js';
+import { FrameRateReducer }        from './features/framerate-reducer.js';
 
 export class AnimeViewer {
     constructor(canvas, container) {
@@ -27,11 +27,13 @@ export class AnimeViewer {
         this.clock          = new THREE.Clock();
         this.loadedModel    = null;
 
-        // Track the loaded skybox texture so we can restore it correctly
-        // when sky override is toggled off
-        this.loadedSkyboxTexture = null;
+        // Store BOTH the raw loaded texture AND the PMREM-processed version
+        // Raw = for feeding into sky dome shader (equirect)
+        // Processed = for scene.background (cube-mapped, tone-mapped correctly)
+        this.loadedSkyboxTexture     = null; // raw equirect texture
+        this.loadedSkyboxBackground  = null; // PMREM-processed for scene.background
 
-        this.mixer        = null;
+        this.mixer         = null;
         this.blenderCamera = null;
         this.usesBlenderCam = false;
 
@@ -58,9 +60,9 @@ export class AnimeViewer {
 
     setupRenderer() {
         this.renderer = new THREE.WebGLRenderer({
-            canvas: this.canvas,
-            antialias: true,
-            alpha: false,
+            canvas:           this.canvas,
+            antialias:        true,
+            alpha:            false,
             powerPreference: 'high-performance'
         });
         this.renderer.setSize(this.container.clientWidth, this.container.clientHeight);
@@ -86,16 +88,17 @@ export class AnimeViewer {
         this.controls.dampingFactor = 0.05;
         this.controls.maxPolarAngle = Math.PI / 2 + 0.1;
 
-        this.blenderCamera  = null;
         this.currentCamera  = this.orbitCamera;
         this.usesBlenderCam = false;
     }
 
     setupLighting() {
-        this.ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+        // Ambient — moderate intensity, never goes fully off
+        this.ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
         this.scene.add(this.ambientLight);
 
-        this.mainDirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+        // Main fill light — moderate, not too bright, casts shadows on model
+        this.mainDirLight = new THREE.DirectionalLight(0xffeedd, 1.2);
         this.mainDirLight.position.set(10, 18, 12);
         this.mainDirLight.castShadow = true;
         this.mainDirLight.shadow.mapSize.width  = 1024;
@@ -110,20 +113,13 @@ export class AnimeViewer {
         this.mainDirLight.shadow.bias          = -0.001;
         this.mainDirLight.shadow.normalBias    =  0.02;
         this.scene.add(this.mainDirLight);
-
-        // FIX: mainDirLight.target must be in the scene to work correctly
         this.scene.add(this.mainDirLight.target);
         this.mainDirLight.target.position.set(0, 0, 0);
 
-        // Shadow receiver — invisible plane, receives cast shadows
-        const groundGeo = new THREE.PlaneGeometry(200, 200);
-        const groundMat = new THREE.ShadowMaterial({ opacity: 0.4, transparent: true });
-        this.shadowReceiver = new THREE.Mesh(groundGeo, groundMat);
-        this.shadowReceiver.rotation.x = -Math.PI / 2;
-        this.shadowReceiver.position.y = 0;
-        this.shadowReceiver.receiveShadow = true;
-        this.shadowReceiver.visible = true;
-        this.scene.add(this.shadowReceiver);
+        // NOTE: The shadow receiver plane is now managed by MeshShadowsSystem
+        // so it only shows when the user enables "Mesh Shadows".
+        // We do NOT add a permanent black shadow plane here — that was the
+        // "completely black plane" bug.
     }
 
     setupHelpers() {
@@ -139,12 +135,12 @@ export class AnimeViewer {
         this.renderPass = new RenderPass(this.scene, this.currentCamera);
         this.composer.addPass(this.renderPass);
 
-        // Bloom / Glare pass (strength=0 → disabled until toggled)
+        // Glare/bloom pass — starts disabled (strength=0)
         this.bloomPass = new UnrealBloomPass(
             new THREE.Vector2(this.container.clientWidth, this.container.clientHeight),
-            0.0,   // strength
-            0.15,  // radius  — tighter default
-            0.85   // threshold — only bright areas
+            0.0,   // strength (off)
+            0.15,  // radius
+            0.75   // threshold — only bright highlights bloom
         );
         this.composer.addPass(this.bloomPass);
 
@@ -170,12 +166,12 @@ export class AnimeViewer {
                 uniform float u_saturation;
                 varying vec2 vUv;
                 void main() {
-                    vec4 texel = texture2D(tDiffuse, vUv);
-                    vec3 color = texel.rgb * u_exposure;
-                    color = (color - 0.5) * u_contrast + 0.5;
-                    float luma = dot(color, vec3(0.299, 0.587, 0.114));
-                    color = mix(vec3(luma), color, u_saturation);
-                    gl_FragColor = vec4(clamp(color, 0.0, 1.0), texel.a);
+                    vec4  tex   = texture2D(tDiffuse, vUv);
+                    vec3  col   = tex.rgb * u_exposure;
+                    col = (col - 0.5) * u_contrast + 0.5;
+                    float luma  = dot(col, vec3(0.299, 0.587, 0.114));
+                    col = mix(vec3(luma), col, u_saturation);
+                    gl_FragColor = vec4(clamp(col, 0.0, 1.0), tex.a);
                 }
             `
         });
@@ -183,25 +179,25 @@ export class AnimeViewer {
     }
 
     setupFeatureSystems() {
-        this.specularSystem    = new SpecularHighlightSystem(this.scene);
-        this.meshShadowSystem  = new MeshShadowsSystem(this.scene);
+        this.specularSystem      = new SpecularHighlightSystem(this.scene);
+        this.meshShadowSystem    = new MeshShadowsSystem(this.scene);
         this.highlightBlurSystem = new HighlightBlurSystem(this.bloomPass);
-        this.skySystem         = new SkyColorSystem(this.scene);
-        this.outlineFeature    = new OutlineFeature();
-        this.celShader         = new CelShaderSystem();
-        this.bloomFeature      = new BloomFeature(this.canvas, this.container);
-        this.fpsReducer        = new FrameRateReducer();
+        this.skySystem           = new SkyColorSystem(this.scene);
+        this.outlineFeature      = new OutlineFeature();
+        this.celShader           = new CelShaderSystem();
+        this.bloomFeature        = new BloomFeature(this.canvas, this.container);
+        this.fpsReducer          = new FrameRateReducer();
 
         this.features = {
-            outline:      false,
-            fpsReducer:   false,
-            bloom:        false,
-            celFilter:    false,
-            meshShadows:  false,
+            outline:       false,
+            fpsReducer:    false,
+            bloom:         false,
+            celFilter:     false,
+            meshShadows:   false,
             highlightBlur: false,
-            skyOverride:  false,
-            skyNightMode: false,
-            specular:     false
+            skyOverride:   false,
+            skyNightMode:  false,
+            specular:      false,
         };
     }
 
@@ -220,7 +216,7 @@ export class AnimeViewer {
         this.mixer.time = 0;
         this.clock.getDelta();
         if (this.isPlaying) {
-            this.mixer._actions.forEach(act => { act.reset(); act.play(); });
+            this.mixer._actions.forEach(a => { a.reset(); a.play(); });
         }
     }
 
@@ -250,26 +246,27 @@ export class AnimeViewer {
         const fov    = this.orbitCamera.fov * (Math.PI / 180);
         const cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2)) * 1.8;
 
-        this.orbitCamera.position.set(
-            center.x,
-            center.y + size.y * 0.25,
-            center.z + cameraZ
-        );
+        this.orbitCamera.position.set(center.x, center.y + size.y * 0.25, center.z + cameraZ);
         this.controls.target.copy(center);
         this.controls.update();
 
-        // Move shadow receiver to model base
-        this.shadowReceiver.position.y = box.min.y;
-
-        // Tell shadow system where the floor is for blob shadows
-        this.meshShadowSystem.setFloorY(box.min.y);
-
-        // Tell specular system where model center is so light targets the mesh
+        // Tell systems about model bounds
         this.specularSystem.setModelCenter(center);
+        this.meshShadowSystem.setFloorY(box.min.y);
+        this.meshShadowSystem.setModelCenter(center);
 
-        // Aim main directional light at model center too
+        // Aim main light at model center
         this.mainDirLight.target.position.copy(center);
         this.mainDirLight.target.updateMatrixWorld();
+
+        // Sync sky sun to current specular light position
+        this.skySystem.setSunDirection(
+            this.specularSystem.params.sunOrbitDegrees,
+            this.specularSystem.params.sunAltitudeDegrees
+        );
+
+        // Move grid to model base
+        this.gridHelper.position.y = box.min.y;
     }
 
     // =========================================================================
@@ -284,10 +281,16 @@ export class AnimeViewer {
     updateShadowMapResolution(res) {
         this.mainDirLight.shadow.mapSize.width  = res;
         this.mainDirLight.shadow.mapSize.height = res;
-        // Dispose old map to force Three.js to regenerate it at new resolution
         if (this.mainDirLight.shadow.map) {
             this.mainDirLight.shadow.map.dispose();
             this.mainDirLight.shadow.map = null;
+        }
+        // Also update the MeshShadowsSystem shadow light
+        this.meshShadowSystem.shadowLight.shadow.mapSize.width  = res;
+        this.meshShadowSystem.shadowLight.shadow.mapSize.height = res;
+        if (this.meshShadowSystem.shadowLight.shadow.map) {
+            this.meshShadowSystem.shadowLight.shadow.map.dispose();
+            this.meshShadowSystem.shadowLight.shadow.map = null;
         }
     }
 
@@ -305,16 +308,16 @@ export class AnimeViewer {
 
     toggleSpecularHighlightFeature() {
         this.features.specular = this.specularSystem.toggle();
-        // Darken ambient when specular is on to sell the side-lighting look
+        // Dim ambient when specular active to enhance side-lighting feel
+        // But never go below 0.25 to avoid pitch-black areas
         this.ambientLight.intensity = this.features.specular
-            ? 0.5 * (1.0 - this.specularSystem.params.shadowDarkening * 0.6)
-            : 0.5;
+            ? Math.max(0.25, 0.6 * (1.0 - this.specularSystem.params.shadowDarkening * 0.5))
+            : 0.6;
         return this.features.specular;
     }
 
     setSpecularSunOrbit(val) {
         this.specularSystem.setSunOrbit(val);
-        // Keep sky sun disc in sync
         this.skySystem.setSunDirection(val, this.specularSystem.params.sunAltitudeDegrees);
     }
 
@@ -326,14 +329,14 @@ export class AnimeViewer {
     setSpecularShadowDarkening(val) {
         this.specularSystem.setShadowDarkening(val);
         if (this.features.specular) {
-            this.ambientLight.intensity = 0.5 * (1.0 - val * 0.6);
+            this.ambientLight.intensity = Math.max(0.25, 0.6 * (1.0 - val * 0.5));
         }
     }
 
     setSpecularIntensity(val) { this.specularSystem.setSpecularIntensity(val); }
 
     // =========================================================================
-    // MESH SHADOWS (Fake 2D blob shadows)
+    // MESH SHADOWS (Real shadow-traced)
     // =========================================================================
 
     toggleMeshShadows() {
@@ -371,15 +374,19 @@ export class AnimeViewer {
         this.features.skyOverride = !this.features.skyOverride;
 
         if (this.features.skyOverride) {
-            // Sky dome ON: hide scene.background (dome renders as geometry)
-            // If a skybox was loaded, composite it inside the dome shader
+            // Sky dome ON → feed any loaded skybox texture into the dome
             this.skySystem.setBackgroundTexture(this.loadedSkyboxTexture);
             this.skySystem.toggle(true);
+            // Must null scene.background so the dome geometry shows
             this.scene.background = null;
         } else {
-            // Sky dome OFF: restore scene.background to skybox or solid color
+            // Sky dome OFF → restore scene.background to loaded skybox or solid
             this.skySystem.toggle(false);
-            if (this.loadedSkyboxTexture) {
+            if (this.loadedSkyboxBackground) {
+                // Use the PMREM-processed version for correct tone mapping
+                this.scene.background = this.loadedSkyboxBackground;
+            } else if (this.loadedSkyboxTexture) {
+                // Fallback: use raw texture
                 this.scene.background = this.loadedSkyboxTexture;
             } else {
                 this.scene.background = new THREE.Color(0x111215);
@@ -410,9 +417,9 @@ export class AnimeViewer {
 
     toggleOutline() {
         if (this.loadedModel && this.outlineFeature.outlineMeshes.length === 0) {
-            // Generate outlines first, then set active state
             this.outlineFeature.generateOutlines(this.loadedModel);
-            this.outlineFeature.isActive = false; // generateOutlines leaves visible=false
+            // generateOutlines sets visible=isActive, so sync state
+            this.outlineFeature.isActive = false;
         }
         this.features.outline = this.outlineFeature.toggle();
         return this.features.outline;
@@ -432,7 +439,7 @@ export class AnimeViewer {
     setCelSteps(val) { this.celShader.setSteps(val); }
 
     // =========================================================================
-    // GLOW OVERLAY (Canvas Bloom)
+    // GLOW OVERLAY
     // =========================================================================
 
     toggleBloomOverlay() {
@@ -452,11 +459,11 @@ export class AnimeViewer {
     }
 
     // =========================================================================
-    // MODEL & ASSET LOADING
+    // MODEL LOADING
     // =========================================================================
 
     loadModelData(arrayBuffer) {
-        // Clean up previous model
+        // Clear previous model
         if (this.loadedModel) {
             this.scene.remove(this.loadedModel);
             this.loadedModel.traverse(node => {
@@ -468,8 +475,7 @@ export class AnimeViewer {
             });
         }
 
-        // Clear all feature state tied to the old model
-        // CelShader must clear BEFORE model is gone (it restores original mats on nodes)
+        // Clear feature state for old model (cel MUST go before model removal)
         this.celShader.clearPatches();
         this.outlineFeature.clearOutlines();
         this.meshShadowSystem.clearProxies();
@@ -489,7 +495,7 @@ export class AnimeViewer {
                 if (!this.blenderCamera) this.blenderCamera = cam;
             });
 
-            // Configure all meshes
+            // Configure meshes for shadows and depth
             this.loadedModel.traverse((node) => {
                 if (node.isMesh) {
                     node.castShadow    = true;
@@ -501,57 +507,67 @@ export class AnimeViewer {
                 }
             });
 
-            // Add model to scene FIRST, then apply shaders
-            // (cel shader needs nodes in scene to compile on first render)
             this.scene.add(this.loadedModel);
 
-            // Apply cel shader patches to all standard materials
+            // Apply cel shader patches (clones materials, adds onBeforeCompile)
             this.celShader.applyToModel(this.loadedModel);
 
-            // Generate outlines if feature was already active
+            // Re-generate outlines if feature was active
             if (this.features.outline) {
                 this.outlineFeature.generateOutlines(this.loadedModel);
                 this.outlineFeature.isActive = false;
-                this.outlineFeature.toggle(); // ensure visible=true
+                this.outlineFeature.toggle();
             }
 
             // Setup animation mixer
             if (gltf.animations && gltf.animations.length > 0) {
                 this.mixer = new THREE.AnimationMixer(this.loadedModel);
-                gltf.animations.forEach((clip) => {
-                    this.mixer.clipAction(clip).play();
-                });
+                gltf.animations.forEach(clip => this.mixer.clipAction(clip).play());
             }
 
-            // Focus camera, position shadow receiver, tell systems about model bounds
+            // Focus camera and update all positional systems
             this.focusAndScaleModel();
 
-            // Build mesh shadow proxies after focusAndScaleModel sets floorY
+            // Build shadow proxies after floor Y is set
             if (this.features.meshShadows) {
                 this.meshShadowSystem.buildProxies(this.loadedModel);
             }
 
-        }, (err) => {
-            console.error('GLTF load error:', err);
-        });
+        }, (err) => console.error('GLTF load error:', err));
+    }
+
+    // =========================================================================
+    // SKYBOX LOADING
+    // =========================================================================
+
+    _processSkyboxTexture(texture) {
+        texture.mapping = THREE.EquirectangularReflectionMapping;
+
+        // Store raw texture (used by sky dome shader)
+        this.loadedSkyboxTexture = texture;
+
+        // Process through PMREMGenerator for correct scene.background display
+        const pmrem = new THREE.PMREMGenerator(this.renderer);
+        pmrem.compileEquirectangularShader();
+        const envMap = pmrem.fromEquirectangular(texture).texture;
+        pmrem.dispose();
+
+        this.loadedSkyboxBackground = envMap;
+        this.scene.environment      = envMap; // PBR reflections
+
+        if (this.features.skyOverride) {
+            // Sky dome active: feed raw equirect into dome
+            this.skySystem.setBackgroundTexture(texture);
+        } else {
+            // Normal: display processed version as background
+            this.scene.background = envMap;
+        }
     }
 
     loadHDRISkybox(arrayBuffer) {
-        const blob = new Blob([arrayBuffer]);
-        const url  = URL.createObjectURL(blob);
+        const url = URL.createObjectURL(new Blob([arrayBuffer]));
         new RGBELoader().load(url, (texture) => {
-            texture.mapping = THREE.EquirectangularReflectionMapping;
-            this.scene.environment = texture;
-            this.loadedSkyboxTexture = texture;
-
-            if (this.features.skyOverride) {
-                // Sky dome is active: feed texture into dome shader
-                this.skySystem.setBackgroundTexture(texture);
-            } else {
-                // Normal mode: use as scene background
-                this.scene.background = texture;
-            }
-
+            this._processSkyboxTexture(texture);
             URL.revokeObjectURL(url);
         }, undefined, (err) => {
             console.error('HDR load error:', err);
@@ -560,19 +576,9 @@ export class AnimeViewer {
     }
 
     loadEXRSkybox(arrayBuffer) {
-        const blob = new Blob([arrayBuffer]);
-        const url  = URL.createObjectURL(blob);
+        const url = URL.createObjectURL(new Blob([arrayBuffer]));
         new EXRLoader().load(url, (texture) => {
-            texture.mapping = THREE.EquirectangularReflectionMapping;
-            this.scene.environment = texture;
-            this.loadedSkyboxTexture = texture;
-
-            if (this.features.skyOverride) {
-                this.skySystem.setBackgroundTexture(texture);
-            } else {
-                this.scene.background = texture;
-            }
-
+            this._processSkyboxTexture(texture);
             URL.revokeObjectURL(url);
         }, undefined, (err) => {
             console.error('EXR load error:', err);
@@ -581,32 +587,28 @@ export class AnimeViewer {
     }
 
     loadZipCubemap(arrayBuffer) {
-        console.warn('ZIP cubemap loading not yet implemented.');
+        console.warn('ZIP cubemap loading not implemented.');
     }
 
     // =========================================================================
-    // NATIVE RECORDING
+    // RECORDING
     // =========================================================================
 
     startNativeRecording() {
         this.recordedChunks = [];
         const stream = this.canvas.captureStream(30);
-
         let options = { mimeType: 'video/webm; codecs=vp9' };
         if (!MediaRecorder.isTypeSupported(options.mimeType)) options = { mimeType: 'video/webm; codecs=vp8' };
         if (!MediaRecorder.isTypeSupported(options.mimeType)) options = { mimeType: 'video/webm' };
-
         try {
             this.mediaRecorder = new MediaRecorder(stream, options);
             this.mediaRecorder.ondataavailable = (e) => {
-                if (e.data && e.data.size > 0) this.recordedChunks.push(e.data);
+                if (e.data?.size > 0) this.recordedChunks.push(e.data);
             };
             this.mediaRecorder.onstop = () => {
                 const blob = new Blob(this.recordedChunks, { type: 'video/webm' });
                 const url  = URL.createObjectURL(blob);
-                const a    = document.createElement('a');
-                a.href     = url;
-                a.download = `capture_${Date.now()}.webm`;
+                const a    = Object.assign(document.createElement('a'), { href: url, download: `capture_${Date.now()}.webm` });
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
@@ -639,7 +641,7 @@ export class AnimeViewer {
         this.orbitCamera.aspect = w / h;
         this.orbitCamera.updateProjectionMatrix();
 
-        if (this.blenderCamera && this.blenderCamera.isPerspectiveCamera) {
+        if (this.blenderCamera?.isPerspectiveCamera) {
             this.blenderCamera.aspect = w / h;
             this.blenderCamera.updateProjectionMatrix();
         }
@@ -650,38 +652,30 @@ export class AnimeViewer {
     }
 
     // =========================================================================
-    // MAIN RENDER LOOP
+    // RENDER LOOP
     // =========================================================================
 
     animate() {
         const rawDelta = this.clock.getDelta();
         const elapsed  = this.clock.getElapsedTime();
 
-        const shouldRender = this.fpsReducer.shouldRender(rawDelta);
-
-        if (!this.features.fpsReducer || shouldRender) {
+        if (!this.features.fpsReducer || this.fpsReducer.shouldRender(rawDelta)) {
             const delta = this.features.fpsReducer ? this.fpsReducer.getLastDelta() : rawDelta;
 
-            // Sky cloud animation (always runs)
             this.skySystem.update(elapsed);
 
-            // Animation mixer
             if (this.mixer && this.isPlaying) {
                 this.mixer.update(delta);
             }
 
-            // Update fake 2D blob shadows every frame
             this.meshShadowSystem.update();
 
-            // Orbit controls damping
             if (this.controls && !this.usesBlenderCam) {
                 this.controls.update();
             }
 
-            // Post-processing render
             this.composer.render();
 
-            // Canvas glow overlay (on top of composer output)
             if (this.features.bloom) {
                 this.bloomFeature.render();
             }
