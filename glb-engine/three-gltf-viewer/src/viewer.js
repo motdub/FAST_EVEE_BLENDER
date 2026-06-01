@@ -306,13 +306,25 @@ export class AnimeViewer {
     // SPECULAR HIGHLIGHT SYSTEM
     // =========================================================================
 
+    // Shared logic: ambient intensity is reduced when shadows OR specular are active,
+    // so the shadow-facing side of the mesh looks visibly darker.
+    _updateAmbientForShadows() {
+        const shadowActive   = this.features.meshShadows;
+        const specularActive = this.features.specular;
+        const darkening      = this.specularSystem.params.shadowDarkening;
+
+        if (specularActive || shadowActive) {
+            // When shadows are on, drop ambient so the dark side of the mesh is visibly shaded.
+            // Shadow darkening slider controls how deep the shadow side gets.
+            this.ambientLight.intensity = Math.max(0.15, 0.6 * (1.0 - darkening * 0.65));
+        } else {
+            this.ambientLight.intensity = 0.6;
+        }
+    }
+
     toggleSpecularHighlightFeature() {
         this.features.specular = this.specularSystem.toggle();
-        // Dim ambient when specular active to enhance side-lighting feel
-        // But never go below 0.25 to avoid pitch-black areas
-        this.ambientLight.intensity = this.features.specular
-            ? Math.max(0.25, 0.6 * (1.0 - this.specularSystem.params.shadowDarkening * 0.5))
-            : 0.6;
+        this._updateAmbientForShadows();
         return this.features.specular;
     }
 
@@ -328,12 +340,16 @@ export class AnimeViewer {
 
     setSpecularShadowDarkening(val) {
         this.specularSystem.setShadowDarkening(val);
-        if (this.features.specular) {
-            this.ambientLight.intensity = Math.max(0.25, 0.6 * (1.0 - val * 0.5));
-        }
+        this._updateAmbientForShadows();
     }
 
     setSpecularIntensity(val) { this.specularSystem.setSpecularIntensity(val); }
+    setSpecularRimIntensity(val) { this.specularSystem.setRimIntensity(val); }
+    setSpecularSunColor(hex) {
+        this.specularSystem.setSunColor(hex);
+        // Also tint the sky sun to match
+        this.skySystem.setSunColor(hex);
+    }
 
     // =========================================================================
     // MESH SHADOWS (Real shadow-traced)
@@ -345,6 +361,9 @@ export class AnimeViewer {
         if (this.features.meshShadows && this.loadedModel) {
             this.meshShadowSystem.buildProxies(this.loadedModel);
         }
+        // Darken the shadow-facing side by reducing ambient when shadows are active.
+        // This makes the shadow side visibly darker vs the lit side.
+        this._updateAmbientForShadows();
         return this.features.meshShadows;
     }
 
@@ -377,11 +396,15 @@ export class AnimeViewer {
             // Sky dome ON → feed any loaded skybox texture into the dome
             this.skySystem.setBackgroundTexture(this.loadedSkyboxTexture);
             this.skySystem.toggle(true);
-            // Must null scene.background so the dome geometry shows
+            // Must null scene.background so the dome geometry shows.
+            // Set a sky-blue clear color so the area behind the dome isn't black
+            // (can happen if camera clips through the sphere at extreme angles).
             this.scene.background = null;
+            this.renderer.setClearColor(new THREE.Color(0x7dd3fc), 1);
         } else {
             // Sky dome OFF → restore scene.background to loaded skybox or solid color
             this.skySystem.toggle(false);
+            this.renderer.setClearColor(new THREE.Color(0x000000), 1);
             if (this.loadedSkyboxBackground) {
                 // Raw equirect texture with EquirectangularReflectionMapping displays correctly
                 this.scene.background = this.loadedSkyboxBackground;

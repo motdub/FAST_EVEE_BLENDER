@@ -45,6 +45,7 @@ export class SkyColorSystem {
                 u_nightMode:            { value: 0.0 },
                 u_moonPhase:            { value: 1.0 },
                 u_sunDir:               { value: new THREE.Vector3(0.6, 0.7, 0.4).normalize() },
+                u_sunColor:             { value: new THREE.Color('#fff4e0') },
                 u_time:                 { value: 0.0 },
             },
             vertexShader: `
@@ -67,6 +68,7 @@ export class SkyColorSystem {
                 uniform float     u_nightMode;
                 uniform float     u_moonPhase;
                 uniform vec3      u_sunDir;
+                uniform vec3      u_sunColor;
                 uniform float     u_time;
 
                 float hash(vec2 p) {
@@ -108,7 +110,7 @@ export class SkyColorSystem {
                     float disc   = smoothstep(0.9994, 0.9999, sunDot);
                     float halo   = pow(max(sunDot, 0.0), 48.0) * 0.4;
                     float glow   = pow(max(sunDot, 0.0), 8.0)  * 0.12;
-                    vec3  sunC   = vec3(1.0, 0.95, 0.7);
+                    vec3  sunC   = u_sunColor;
                     dayBg = mix(dayBg, dayBg + sunC * glow,  1.0);
                     dayBg = mix(dayBg, sunC,                  halo);
                     dayBg = mix(dayBg, vec3(1.0, 1.0, 0.92), disc);
@@ -191,4 +193,5 @@ export class SkyColorSystem {
     setCloudAmount(val)  { this.mat.uniforms.u_cloudAmount.value = val; }
     setCloudColor(hex)   { this.mat.uniforms.u_cloudColor.value.set(hex); }
     setMoonPhase(val)    { this.mat.uniforms.u_moonPhase.value   = val; }
+    setSunColor(hex)     { this.mat.uniforms.u_sunColor.value.set(hex); }
 }

@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minimal GLTF Audio Project</title>
+    <meta name="google-adsense-account" content="ca-pub-4705101597314965">
+    <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-4705101597314965" crossorigin="anonymous"></script>
+    <style>
+        /* Immersive Screen-Recording CSS Overrides */
+        .hide-for-recording #minimal-upload-control,
+        .hide-for-recording #engine-control-deck,
+        .hide-for-recording .ad-slot,
+        .hide-for-recording #timeline-container {
+            display: none !important;
+        }
+        .hide-for-recording #viewport-container {
+            width: 100vw !important;
+            height: 100vh !important;
+            position: fixed !important;
+            top: 0 !important;
+            left: 0 !important;
+            z-index: 99999 !important;
+        }
+        #recording-modal-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100vw; height: 100vh;
+            background: rgba(15, 23, 42, 0.9);
+            display: none; justify-content: center; align-items: center;
+            z-index: 100000; font-family: sans-serif;
+        }
+        .modal-card {
+            background: #1e293b; border: 1px solid #38bdf8; padding: 2.5rem;
+            border-radius: 12px; width: 480px; max-width: 90%; text-align: center; color: #f8fafc;
+        }
+        .modal-card h3 { margin-top: 0; margin-bottom: 1.5rem; color: #38bdf8; }
+        .modal-stack { display: flex; flex-direction: column; gap: 0.85rem; }
+        .modal-btn {
+            background: #334155; border: 1px solid #475569; color: #f1f5f9;
+            padding: 0.75rem; border-radius: 6px; cursor: pointer; font-size: 0.95rem;
+            transition: all 0.2s ease; font-weight: 500;
+        }
+        .modal-btn:hover { background: #475569; border-color: #38bdf8; }
+        .modal-btn.accent { background: #0284c7; border-color: #0ea5e9; }
+        .modal-btn.accent:hover { background: #0369a1; }
+       
+        /* Scaled and Emphasized Presentation Toast */
+        #recording-toast {
+            position: fixed; top: 25%; left: 50%; transform: translate(-50%, -50%);
+            background: rgba(15, 23, 42, 0.95); border: 2px solid #38bdf8; color: #38bdf8;
+            padding: 2rem 3.5rem; border-radius: 16px; font-size: 1.85rem; font-weight: bold;
+            font-family: sans-serif; z-index: 100001; pointer-events: none;
+            opacity: 0; transition: opacity 0.3s ease; text-align: center;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.7); max-width: 80%; line-height: 1.4;
+        }
+
+        /* Responsive UI Layout Fixes */
+        #engine-control-deck {
+            display: flex !important;
+            flex-wrap: wrap !important; /* Forces components to drop down if they run out of space */
+            gap: 1rem !important;
+            max-width: 100% !important;
+            box-sizing: border-box !important;
+        }
+        .control-column-group {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div id="app-container">
+       
+        <div class="ad-slot ad-sidebar-left">
+            <ins class="adsbygoogle" style="display:block;height:100%;" data-ad-client="ca-pub-4705101597314965" data-ad-slot="AUTO_GENERATED_LEFT_ID" data-ad-format="vertical" data-full-width-responsive="true"></ins>
+            <script>(adsbygoogle = window.adsbygoogle || []).push({});</script>
+        </div>
+
+        <div id="viewport-container">
+            <canvas id="three-canvas"></canvas>
+            <div id="drop-zone-overlay">Drag & Drop Your Asset Files Here</div>
+           
+            <div id="minimal-upload-control">
+                <label for="glb-file-picker" class="upload-btn glb-btn">Import .GLB File</label>
+                <input type="file" id="glb-file-picker" accept=".glb,.gltf" style="display: none;">
+
+                <label for="hdri-file-picker" class="upload-btn hdri-btn">Import Skybox (.hdr, .exr, .zip)</label>
+                <input type="file" id="hdri-file-picker" accept=".hdr,.exr,.zip" style="display: none;">
+            </div>
+
+            <div id="engine-control-deck">
+               
+                <div class="control-column-group">
+                    <div class="deck-section">
+                        <h4>Playback Controls</h4>
+                        <div class="deck-row">
+                            <button id="btn-play-pause" class="deck-btn">Pause</button>
+                            <button id="btn-restart" class="deck-btn">Restart</button>
+                        </div>
+                    </div>
+
+                    <div class="deck-section">
+                        <h4>Color Corrections</h4>
+                        <label class="slider-block">
+                            <span>Exposure</span>
+                            <input type="range" id="slider-exposure" min="0.2" max="2.5" step="0.05" value="1.0">
+                        </label>
+                        <label class="slider-block">
+                            <span>Contrast</span>
+                            <input type="range" id="slider-contrast" min="0.5" max="2.0" step="0.05" value="1.0">
+                        </label>
+                        <label class="slider-block">
+                            <span>Saturation</span>
+                            <input type="range" id="slider-saturation" min="0.0" max="2.0" step="0.05" value="1.0">
+                        </label>
+                    </div>
+                </div>
+
+                <div class="deck-section">
+                    <h4>Camera View System</h4>
+                    <div class="deck-row">
+                        <button id="btn-camera-toggle" class="deck-btn toggle-inactive">Orbit Camera Mode</button>
+                        <button id="btn-focus-model" class="deck-btn">Locate Asset</button>
+                    </div>
+                </div>
+
+                <div class="deck-section">
+                    <h4>Capture & Presentation</h4>
+                    <div class="deck-row">
+                        <button id="btn-fullscreen-record" class="deck-btn accent-record-btn" style="background:#0284c7; border-color:#38bdf8; color:#fff;">Screen Recording Mode</button>
+                    </div>
+                </div>
+
+                <div class="deck-section">
+                    <h4>Scene Helpers</h4>
+                    <div class="deck-row">
+                        <button id="btn-grid-toggle" class="deck-btn toggle-inactive">Grid Floor OFF</button>
+                    </div>
+                </div>
+
+                <div class="deck-section">
+                    <h4>Shadow Quality Map</h4>
+                    <select id="select-shadow-res" class="deck-select">
+                        <option value="512">Low (512x512)</option>
+                        <option value="1024" selected>Medium (1024x1024)</option>
+                        <option value="2048">High (2048x2048)</option>
+                        <option value="4096">Cinematic (4096x4096)</option>
+                    </select>
+                </div>
+
+                <div class="deck-section" style="border-left: 3px solid #f59e0b;">
+                    <h4>Specular Highlight Overlay</h4>
+                    <div class="deck-row">
+                        <button id="toggle-specular" class="deck-btn toggle-inactive">Specular Overlay OFF</button>
+                    </div>
+                    <label class="slider-block">
+                        <span>Sun Orbit (°)</span>
+                        <input type="range" id="slider-sun-orbit" min="0" max="360" step="1" value="45">
+                    </label>
+                    <label class="slider-block">
+                        <span>Sun Altitude (°)</span>
+                        <input type="range" id="slider-sun-altitude" min="0" max="90" step="1" value="45">
+                    </label>
+                    <label class="slider-block">
+                        <span>Shadow Darken</span>
+                        <input type="range" id="slider-shadow-darkening" min="0.0" max="1.0" step="0.05" value="0.3">
+                    </label>
+                    <label class="slider-block">
+                        <span>Highlight Tint</span>
+                        <input type="range" id="slider-specular-intensity" min="0.0" max="3.0" step="0.1" value="1.0">
+                    </label>
+                    <label class="slider-block">
+                        <span>Lit-Side Rim</span>
+                        <input type="range" id="slider-specular-rim-intensity" min="0.0" max="6.0" step="0.1" value="2.0">
+                    </label>
+                    <label class="slider-block" style="display: flex; align-items: center; justify-content: space-between;">
+                        <span>Sun Color</span>
+                        <input type="color" id="picker-specular-sun-color" value="#fff4e0" style="border: none; background: transparent; cursor: pointer; height: 26px; width: 45px;">
+                    </label>
+                </div>
+
+                <div class="deck-section" style="border-left: 3px solid #10b981;">
+                    <h4>Fake 2D Mesh Shadows</h4>
+                    <div class="deck-row">
+                        <button id="toggle-mesh-shadows" class="deck-btn toggle-inactive">Mesh Shadows OFF</button>
+                    </div>
+                    <label class="slider-block">
+                        <span>Transparency</span>
+                        <input type="range" id="slider-mesh-shadow-opacity" min="0.0" max="1.0" step="0.05" value="0.6">
+                    </label>
+                    <label class="slider-block" style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+                        <span>Shadow Color</span>
+                        <input type="color" id="picker-mesh-shadow-color" value="#111116" style="border: none; background: transparent; cursor: pointer; height: 26px; width: 45px;">
+                    </label>
+                    <label class="slider-block">
+                        <span>Direction Offset X</span>
+                        <input type="range" id="slider-mesh-shadow-offset-x" min="-10.0" max="10.0" step="0.1" value="0.0">
+                    </label>
+                    <label class="slider-block">
+                        <span>Direction Offset Z</span>
+                        <input type="range" id="slider-mesh-shadow-offset-z" min="-10.0" max="10.0" step="0.1" value="0.0">
+                    </label>
+                </div>
+
+                <div class="deck-section" style="border-left: 3px solid #6366f1;">
+                    <h4>Highlight Compositing Blur</h4>
+                    <div class="deck-row">
+                        <button id="toggle-highlight-blur" class="deck-btn toggle-inactive">Glare Effect OFF</button>
+                    </div>
+                    <label class="slider-block">
+                        <span>Intensity</span>
+                        <input type="range" id="slider-highlight-blur-intensity" min="0.0" max="5.0" step="0.1" value="1.0">
+                    </label>
+                    <label class="slider-block">
+                        <span>Brightness Cutoff</span>
+                        <input type="range" id="slider-highlight-blur-threshold" min="0.0" max="1.0" step="0.01" value="0.75">
+                    </label>
+                    <label class="slider-block">
+                        <span>Glare Size/Blur</span>
+                        <input type="range" id="slider-highlight-glare-size" min="0.5" max="10.0" step="0.5" value="3.0">
+                    </label>
+                </div>
+
+                <div class="deck-section" style="border-left: 3px solid #06b6d4;">
+                    <h4>Independent Sky Color</h4>
+                    <div class="deck-row" style="gap: 0.5rem; margin-bottom: 0.5rem;">
+                        <button id="toggle-sky-override" class="deck-btn toggle-inactive" style="flex: 1;">Sky Override OFF</button>
+                        <button id="toggle-sky-night" class="deck-btn toggle-inactive" style="flex: 1;">Sky Night Mode OFF</button>
+                    </div>
+                    <div class="deck-row" style="margin-bottom: 0.5rem;">
+                        <select id="select-sky-moon-phase" class="deck-select" style="width: 100%;">
+                            <option value="crescent">Crescent Moon</option>
+                            <option value="half">Half Moon</option>
+                            <option value="full" selected>Full Moon</option>
+                        </select>
+                    </div>
+                    <label class="slider-block">
+                        <span>Sun Orbit (°)</span>
+                        <input type="range" id="slider-sky-sun-orbit" min="0" max="360" step="1" value="45">
+                    </label>
+                    <label class="slider-block">
+                        <span>Sun Altitude (°)</span>
+                        <input type="range" id="slider-sky-sun-altitude" min="0" max="90" step="1" value="60">
+                    </label>
+                    <label class="slider-block">
+                        <span>Sky Exposure</span>
+                        <input type="range" id="slider-sky-exposure" min="0.0" max="4.0" step="0.1" value="1.0">
+                    </label>
+                    <label class="slider-block">
+                        <span>Cloud Amount</span>
+                        <input type="range" id="slider-sky-cloud-amount" min="0.0" max="1.0" step="0.05" value="0.45">
+                    </label>
+                    <label class="slider-block" style="display: flex; align-items: center; justify-content: space-between;">
+                        <span>Cloud Color</span>
+                        <input type="color" id="picker-sky-cloud-color" value="#ffffff" style="border: none; background: transparent; cursor: pointer; height: 26px; width: 45px;">
+                    </label>
+                    <label class="slider-block" style="display: flex; align-items: center; justify-content: space-between;">
+                        <span>Sun Color</span>
+                        <input type="color" id="picker-sky-sun-color" value="#fff4e0" style="border: none; background: transparent; cursor: pointer; height: 26px; width: 45px;">
+                    </label>
+                </div>
+
+                <div class="deck-section style-deck-override">
+                    <h4>Stylization Engine (2D Screen Overlays)</h4>
+                    <div class="deck-row row-wrap-fix">
+                        <button id="toggle-outline" class="style-toggle">Outline OFF</button>
+                        <label class="slider-block style-slider">
+                            <span>Thick</span>
+                            <input type="range" id="slider-outline-weight" min="1.0" max="5.0" step="0.5" value="1.5">
+                        </label>
+                    </div>
+                    <div class="deck-row row-wrap-fix">
+                        <button id="toggle-fps-limit" class="style-toggle">Dynamic FPS OFF</button>
+                    </div>
+                    <div class="deck-row row-wrap-fix">
+                        <button id="toggle-bloom" class="style-toggle">Glow Overlay OFF</button>
+                        <label class="slider-block style-slider">
+                            <span>Glow</span>
+                            <input type="range" id="slider-bloom-glow" min="0.1" max="3.0" step="0.1" value="1.0">
+                        </label>
+                    </div>
+                    <div class="deck-row row-wrap-fix">
+                        <button id="toggle-anime-filter" class="style-toggle">Cel Filter OFF</button>
+                        <label class="slider-block style-slider">
+                            <span>Detail</span>
+                            <input type="range" id="slider-anime-steps" min="2" max="8" step="1" value="4">
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="recording-modal-overlay">
+            <div class="modal-card">
+                <h3>Screen Recording Deck</h3>
+                <div class="modal-stack">
+                    <button id="mdl-btn-camera-toggle" class="modal-btn">1. Toggle Camera (Orbit / Blender)</button>
+                    <button id="mdl-btn-native-rec" class="modal-btn accent">2. Record with Built-in Website Recorder</button>
+                    <button id="mdl-btn-reset-only" class="modal-btn">3. Reset Animations to Beginning</button>
+                    <button id="mdl-btn-reset-play" class="modal-btn">4. Reset & Play (For External OBS)</button>
+                    <button id="mdl-btn-close" class="modal-btn" style="background:#ef4444; border-color:#f87171;">5. CLOSE OPTIONS MENU & START</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="recording-toast">spacebar as play/pause while fullscreen and have escape button escape fullscreen</div>
+
+        <div class="ad-slot ad-sidebar-right">
+            <ins class="adsbygoogle" style="display:block;height:100%;" data-ad-client="ca-pub-4705101597314965" data-ad-slot="AUTO_GENERATED_LEFT_ID" data-ad-format="vertical" data-full-width-responsive="true"></ins>
+            <script>(adsbygoogle = window.adsbygoogle || []).push({});</script>
+        </div>
+
+        <div class="ad-slot ad-footer-bottom">
+            <ins class="adsbygoogle" style="display:inline-block;width:100%;height:90px" data-ad-client="ca-pub-4705101597314965" data-ad-slot="AUTO_GENERATED_BOTTOM_ID"></ins>
+            <script>(adsbygoogle = window.adsbygoogle || []).push({});</script>
+        </div>
+
+        <div id="timeline-container">
+            <div id="timeline-header">
+                <span>Sound Synchronization Grid Editor</span>
+                <button id="add-track-btn">+ Add Audio Sub-Layer</button>
+            </div>
+            <div id="audio-tracks-wrapper"></div>
+        </div>
+    </div>
+    <script src="/dist/bundle.js"></script>
+</body>
+</html>

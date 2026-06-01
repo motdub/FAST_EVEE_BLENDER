@@ -184,6 +184,12 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('slider-specular-intensity')?.addEventListener('input', (e) => {
         viewer.setSpecularIntensity(parseFloat(e.target.value));
     });
+    document.getElementById('slider-specular-rim-intensity')?.addEventListener('input', (e) => {
+        viewer.setSpecularRimIntensity(parseFloat(e.target.value));
+    });
+    document.getElementById('picker-specular-sun-color')?.addEventListener('input', (e) => {
+        viewer.setSpecularSunColor(e.target.value);
+    });
 
     // =========================================================================
     // MESH SHADOWS
@@ -267,6 +273,9 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     document.getElementById('picker-sky-cloud-color')?.addEventListener('input', (e) => {
         viewer.setSkyCloudColor(e.target.value);
+    });
+    document.getElementById('picker-sky-sun-color')?.addEventListener('input', (e) => {
+        viewer.skySystem.setSunColor(e.target.value);
     });
 
     // =========================================================================
