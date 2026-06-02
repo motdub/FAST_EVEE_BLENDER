@@ -1,5 +1,5 @@
 # FAST_EVEE_BLENDER
-Addon and Render Engine to Replace Slow Evee using Game Engine Technology
+Addon https://github.com/motdub/BLENDER_TO_glb_exporter_for_FAST_EVEE_BLENDER and Render Engine (this repo) to Replace Slow Evee using Game Engine Technology
 
 RENDER ENGINE IS UP https://fast-evee-blender.vercel.app/ acess online ANYWHERE NO INSTALL fast rendering with a screen recorder
 extract the model and textures from blender to put into here https://github.com/motdub/FAST_EVEE_BLENDER/tree/main/glb-engine/blender-addon 
